@@ -1,48 +1,55 @@
-abstract type AbstractIndexer end
+# using `adapt` as a free walk interface
+using Random
+struct IndexerAdaptor{R<:Union{Nothing, AbstractRNG}}; rng::R; end
+IndexerAdaptor() = IndexerAdaptor(Random.default_rng())
 
-struct Indexer{T, D<:Union{Nothing, Tuple{Vararg{Int}}}, Ns<:NamedTuple} <: AbstractIndexer
-    __fields::Ns
-    dest_size::D
+abstract type AbstractIndexer{T, N} <: AbstractArray{T, N} end
+struct Indexer{T, M <: AbstractMask, N} <: AbstractIndexer{T, N}
+    scale::T
+    mask::M
+    destsize::Dims{N}
 end
-
-Indexer{T}(x::NamedTuple, dest_size = nothing) where T = Indexer{T, typeof(dest_size), typeof(x)}(x, dest_size)
-
-IndexedType(::Indexer{T}) where T = T
-
-function Base.getproperty(I::Indexer, x::Symbol)
-    fs = getfield(I, :__fields)
-    haskey(fs, x) && return fs[x]
-    x == :__fields && return fs
-    x == :dest_size && return getfield(I, :dest_size)
-    error("type Indexer{$(IndexedType(I))} has no field $x")
+Indexer(mask::AbstractMask, destsize::Dims, scale = true) = Indexer(IndexerAdaptor(), mask, destsize, scale)
+function Indexer(to::IndexerAdaptor, mask::AbstractMask, destsize::Dims{N}, scale = true) where N
+    m = adapt(to, mask)
+    return Indexer{typeof(scale), typeof(m), N}(scale, m, destsize)
 end
+GetIndexer(mask::AbstractMask, destsize::Dims, scale = true) = GetIndexer(IndexerAdaptor(), mask, destsize, scale)
+function GetIndexer(to::IndexerAdaptor, mask::AbstractMask, destsize::Dims, scale = true)
+    check_constraint(AxesConstraint(mask), destsize)
+    return Indexer(to, mask, destsize, scale)
+end
+Base.length(I::Indexer) = prod(size(I))
+Base.size(I::Indexer) = I.destsize
 
-function GetIndexer(x, dest_size = nothing)
-    if @generated
-        fs = fieldnames(x)
-        ex = Expr(:tuple)
-        for i = 1:fieldcount(x)
-            push!(ex.args,
-                  Expr(:(=), fs[i], :(getfield(x, $i))))
+@inline Base.@propagate_inbounds Base.getindex(m::Indexer{Bool}, I::Integer...) = __maskgetindex__(m.destsize, m.mask, I...)
+@inline Base.@propagate_inbounds Base.getindex(m::Indexer{Bool}, I::Tuple) = __maskgetindex__(m.destsize, m.mask, I...)
+@inline Base.@propagate_inbounds Base.getindex(m::Indexer, I::Integer...) = ifelse(__maskgetindex__(m.destsize, m.mask, I...), m.scale, zero(m.scale))
+@inline Base.@propagate_inbounds Base.getindex(m::Indexer, I::Tuple) = ifelse(__maskgetindex__(m.destsize, m.mask, I...), m.scale, zero(m.scale))
+
+using Adapt
+import Adapt: adapt_structure
+adapt_structure(to, m::Indexer) = (mask = adapt(to, m.mask); Indexer{eltype(m), typeof(mask), ndims(m)}(m.scale, mask, m.destsize))
+Base.print_array(io::IO, m::Indexer) = invoke(Base.print_array, Tuple{IO, AbstractArray{eltype(m), ndims(m)}}, io, Adapt.adapt(Array, m))
+
+using FuncTransforms: FuncTransforms, FuncTransform, FA, VA
+function _maskgetindex_generator(world, source, self, destsize, mask, I)
+    caller = Core.Compiler.specialize_method(
+        FuncTransforms.method_by_ftype(Tuple{self, destsize, mask, I...}, nothing, world))
+    sig = Base.to_tuple_type((typeof(maskgetindex), destsize, mask, I...))
+    ft = FuncTransform(sig, world, [FA(:maskgetindex, 1), FA(:destsize, 2), FA(:mask, 3), VA(:I, 3)]; caller)
+    for (ssavalue, code) in FuncTransforms.FuncInfoIter(ft.fi)
+        stmt = code.stmt
+        newstmt = FuncTransforms.walk(stmt) do x
+            FuncTransforms.resolve(x) isa typeof(maskgetindex) ? FuncTransforms.getparg(ft.fi, 1) : x
         end
-        T = x
-        ret = quote
-            vs = $ex
-            return Indexer{$T}(vs, dest_size)
-        end
-        return ret
-    else
-        T = typeof(x)
-        vs = NamedTuple{fieldnames(T)}(ntuple(i->getfield(x, i), fieldcount(T)))
-        vs = merge(vs, extra)
-        return Indexer{T}(vs, dest_size)
+        FuncTransforms.inlineflag!(code)
+        code.stmt = newstmt
     end
+    ci = FuncTransforms.toCodeInfo(ft; inline = true, propagate_inbounds = true)
+    return ci
 end
-
-adapt_structure(to, x::Indexer) = Indexer{IndexedType(x)}(adapt(to, x.__fields), getfield(x, :dest_size))
-
-function Base.show(io::IO, I::Indexer)
-    print(io, "Indexer{", IndexedType(I), '}')
-    show(io, I.__fields)
-    return io
+@eval function __maskgetindex__(destsize::Dims, mask::AbstractMask, I::Integer...)
+    $(Expr(:meta, :generated, _maskgetindex_generator))
+    $(Expr(:meta, :generated_only))
 end

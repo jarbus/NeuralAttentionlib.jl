@@ -1,4 +1,5 @@
 @testset "functional" begin
+    using Random
     using Statistics
     using Flux
     using Flux.Zygote
@@ -10,10 +11,14 @@
     using NeuralAttentionlib: as_collapsed,
       get_scalar_relative_position_embeddings,
       t5_bucketed_position_id, t5_causal_bucketed_position_id,
-      layer_norm, rms_layer_norm, get_sincos_position_embeddings
+      layer_norm, rms_layer_norm, get_sincos_position_embeddings,
+      dropout_score, dropoutF, alibi_position_embedding, l2norm
+
+    struct Rng <: AbstractRNG end
+    Random.rand(::Rng, ::Type{UInt32}) = zero(UInt32)
 
     @testset "score" begin
-        if !USE_CUDA
+        if !USE_GPU
             @testset "AD" begin
                 test_rrule(dot_product_score, randn(5, 3, 2), randn(5, 4, 2); check_inferred = false)
                 test_rrule(dot_product_score, randn(5, 3, 2, 2), randn(5, 4, 2, 2))
@@ -65,6 +70,19 @@
                     CollapsedDimsArray(randn(5, 21, 3, 2), 1, 2),
                     CollapsedDimsArray(randn(5, 21, 3, 2), 1, 2),
                     ; check_inferred = false)
+                test_rrule(
+                    dropout_score, dropoutF(; rng = Rng(), p = 0.5) ⊢ NoTangent(),
+                    dot_product_score,
+                    CollapsedDimsArray(randn(5, 21, 3, 2), 1, 2),
+                    CollapsedDimsArray(randn(5, 21, 3, 2), 1, 2),
+                    ; check_inferred = false)
+                test_rrule(
+                    dropout_score, dropoutF(; rng = Rng(), p = 0.5) ⊢ NoTangent(),
+                    normalized_score, NNlib.softmax,
+                    dot_product_score,
+                    CollapsedDimsArray(randn(5, 21, 3, 2), 1, 2),
+                    CollapsedDimsArray(randn(5, 21, 3, 2), 1, 2),
+                    ; check_inferred = false)
             end
         end
     end
@@ -84,7 +102,7 @@
             end
         end
 
-        if !USE_CUDA
+        if !USE_GPU
             @testset "AD" begin
                 test_rrule(
                     scalar_relative_position_embedding, t5_bucketed_position_id(8, 20), randn(3, 8),
@@ -145,7 +163,6 @@
             end
             return embedding
         end
-        l2norm(x) = x ./ sqrt.(sum(x .^ 2; dims=1))
         @test get_sincos_position_embeddings(512, false, 1024) ≈ sincos_pe(512, 1024)
         @test get_sincos_position_embeddings(513, false, 1024) ≈ sincos_pe(513, 1024)
         @test get_sincos_position_embeddings(512, true, 1024) ≈ l2norm(sincos_pe(512, 1024))
@@ -182,7 +199,7 @@
         @test with_rotary_position_embedding(x) ≈ naive_rotary_pe(x)
         @test with_rotary_position_embedding(256, x) ≈ naive_rotary_pe_w_dim(256, x)
         @test with_rotary_position_embedding(256)(x) ≈ naive_rotary_pe_w_dim(256, x)
-        if !USE_CUDA
+        if !USE_GPU
             @testset "AD" begin
                 x = randn(512, 5, 3, 2)
                 @test Zygote.gradient(x->sum(sin.(with_rotary_position_embedding(x))), x)[1] ≈
@@ -199,6 +216,45 @@
                 test_rrule(
                     scaled_dot_product_score, with_rotary_position_embedding, randn(512, 5, 2), randn(512, 5, 2);
                     check_inferred = false)
+            end
+        end
+    end
+
+    @testset "alibi position embedding" begin
+        x1 = dzeros(10, 10, 3, 2);
+        x2 = dzeros(10, 10, 3, 2);
+        x1 .= NeuralAttentionlib._build_alibi(nothing, CollapsedDimsArray(randn(10, 5, 2, 3, 2), 2, 2))
+        x2 .= NeuralAttentionlib._build_alibi(Masks.BatchedMask(Masks.GenericAttenMask(trues(10, 10))), CollapsedDimsArray(randn(10, 5, 2, 3, 2), 2, 2))
+        @test x1 ≈ x2
+        if !USE_GPU
+            @testset "AD" begin
+                test_rrule(
+                    alibi_position_embedding,
+                    dot_product_score,
+                    CollapsedDimsArray(randn(5, 21, 3, 2), 1, 2),
+                    CollapsedDimsArray(randn(5, 21, 3, 2), 1, 2),
+                )
+            end
+        end
+    end
+
+    @testset "dropout" begin
+        x = drandn(20, 7)
+        rng1 = Xoshiro()
+        rng2 = copy(rng1)
+        @test dropoutF(; rng = rng1, p = 0.5)(x) ≈ dropoutF(; rng = rng2, p = 0.5)(x)
+        @test dropoutF(; rng = rng1, p = 0.5, dims = 1)(x) ≈ dropoutF(; rng = rng2, p = 0.5, dims = 1)(x)
+        @test dropoutF(; rng = rng1, p = 0.5, dims = 2)(x) ≈ dropoutF(; rng = rng2, p = 0.5, dims = 2)(x)
+        if !USE_GPU
+            @testset "AD" begin
+                test_rrule(dropoutF(; rng = Rng(), p = 0.7) ⊢ NoTangent(), randn(20, 7))
+                test_rrule(dropoutF(; rng = Rng(), p = 0.7, dims=1) ⊢ NoTangent(), randn(20, 7))
+                test_rrule(
+                    dropout_score, dropoutF(; rng = Rng(), p = 0.5) ⊢ NoTangent(),
+                    dot_product_score,
+                    CollapsedDimsArray(randn(5, 21, 3, 2), 1, 2),
+                    CollapsedDimsArray(randn(5, 21, 3, 2), 1, 2),
+                )
             end
         end
     end
@@ -226,7 +282,7 @@
             atol = 5e-1
         )
 
-        if !USE_CUDA
+        if !USE_GPU
             @testset "AD" begin
                 g = randn(20)
                 b = randn(20)
@@ -256,9 +312,16 @@
         end
     end
 
+    @testset "l2norm" begin
+        naive_l2norm(x) = x ./ sqrt.(sum(x .^ 2; dims=1))
+        x = drandn(512, 3, 2)
+        @test l2norm(x) ≈ naive_l2norm(x)
+        @test Zygote.gradient(x->sum(sin.(l2norm(x))), x)[1] ≈ Zygote.gradient(x->sum(sin.(naive_l2norm(x))), x)[1]
+    end
+
     @testset "attention" begin
         @testset "multihead_qkv_attention" begin
-            if !USE_CUDA
+            if !USE_GPU
                 @testset "AD" begin
                     for i = 1:3
                         a = randn(20, 3, 2)
@@ -296,7 +359,7 @@
             @test grad[2] ≈ ngrad[2]
             @test grad[3] ≈ ngrad[3]
 
-            if !USE_CUDA
+            if !USE_GPU
                 @testset "AD" begin
                     for i = 1:3
                         a = randn(30, 3, 2)
