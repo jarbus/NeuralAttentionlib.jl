@@ -331,12 +331,8 @@ function ChainRulesCore.rrule(config::RuleConfig, sr::ScoreReturning, s, v)
     return (hidden_state = y, attention_score = s′), score_returning_pullback
 end
 
-function ChainRulesCore.rrule(config::RuleConfig, ::typeof(dropout), x, p)
-    y, broadcast_pullback = rrule(config, apply_broadcast_mask, (*), RandomMask(p), x, inv(1 - p))
-    dropout_pullback(Ȳ) = (NoTangent(), broadcast_pullback(Ȳ)[4], NoTangent())
-    return y, dropout_pullback
-end
-
+ChainRulesCore.rrule(config::RuleConfig, ::typeof(dropout_score), p::Real, score, args...) =
+    rrule(config, dropout_score, _dropout_func(p), score, args...)
 function ChainRulesCore.rrule(config::RuleConfig, ::typeof(dropout_score), p, score, args...)
     score_tape = rrule(config, score, args...)
     isnothing(score_tape) && (score_tape = rrule_via_ad(config, score, args...))
@@ -348,7 +344,7 @@ function ChainRulesCore.rrule(config::RuleConfig, ::typeof(dropout_score), p, sc
         end
         return score_val, _score_pullback
     else
-        dropf = Base.Fix2(dropout, p)
+        dropf = _dropout_func(p)
         drop_tape = rrule(config, collapseddims, dropf, score_val)
         isnothing(drop_tape) && (drop_tape = rrule_via_ad(config, collapseddims, dropf, score_val))
         y, drop_pullback = drop_tape

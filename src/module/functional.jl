@@ -15,7 +15,8 @@ import ..NeuralAttentionlib:
     split_head, move_head_dim_out_perm, move_head_dim_out,
     move_head_dim_in_perm, move_head_dim_in, merge_head,
     t5_bucketed_position_id, t5_causal_bucketed_position_id,
-    layer_norm, rms_layer_norm, get_sincos_position_embeddings
+    layer_norm, rms_layer_norm, get_sincos_position_embeddings,
+    l2norm, dropout, dropoutF
 
 using ..NeuralAttentionlib: SymLengthMask, BiLengthMask, CausalMask
 
@@ -182,12 +183,13 @@ A relative position embedding that produce a trainable scalar bias for each valu
 scalar_relative_position_embedding
 
 """
-    alibi_position_embedding(mask::Union{AbstractMask, Nothing}, score, args...)
+    alibi_position_embedding(mask::Union{AbstractAttenMask, Nothing}, score, args...)
 
 Add the non-trainable ALiBi position embedding to the attention score. The ALiBi embedding varied for each head, which
  assuming the attention is multi-head variants. The first dimension of the batch dimension of the attention score is
- treated as the head dimension. `mask` can either be a attention mask or `nothing`. Usually, it is needed when there are
- gaps or prefix paddings in the samples.
+ treated as the head dimension (If used in single head attention, the alibi value would vary across batches).
+ `mask` can either be a attention mask or `nothing`. Usually, it is needed when there are gaps or prefix paddings
+ in the samples.
 """
 alibi_position_embedding
 
@@ -326,5 +328,12 @@ If both `alpha` is `Nothing`, this is just a normalization with root-mean-square
  dimension.
 """
 rms_layer_norm
+
+"""
+    l2norm([epsilon = 1e-5,] x)
+
+Function which perform the L2 normalization on `x`.
+"""
+l2norm
 
 end

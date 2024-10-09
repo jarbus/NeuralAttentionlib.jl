@@ -1,20 +1,23 @@
 using Base.Broadcast: BroadcastFunction, broadcasted, materialize
 
-ChainRulesCore.@non_differentiable Base.getindex(m::AbstractMask, I::Integer...)
-ChainRulesCore.@non_differentiable Base.getindex(m::MaskIndexer, I::Integer...)
-ChainRulesCore.@non_differentiable Base.getindex(m::AbstractMask, I::Tuple)
-ChainRulesCore.@non_differentiable Base.getindex(m::MaskIndexer, I::Tuple)
+ChainRulesCore.@non_differentiable Base.getindex(m::Indexer, I...)
+ChainRulesCore.@non_differentiable maskgetindex(::Dims, ::AbstractMask, I::Integer...)
 ChainRulesCore.@non_differentiable (::Type{<:AbstractMask})(args...)
 ChainRulesCore.@non_differentiable (::Type{<:AbstractMaskOp})(args...)
 ChainRulesCore.@non_differentiable getmask(arg...)
 ChainRulesCore.@non_differentiable AttenMask(m)
 ChainRulesCore.@non_differentiable AttenMask(m1, m2)
+ChainRulesCore.@non_differentiable SeqMask(m)
 ChainRulesCore.@non_differentiable lengths(m)
 
-function ChainRulesCore.rrule(::typeof(apply_mask), op::NaiveMaskOp, mask, score)
-    m = as_bool(randomness(mask)) ? getmask(mask, score) : mask
-    naive_apply_mask_pullback(Ȳ) = (NoTangent(), NoTangent(), NoTangent(), unthunk(Ȳ) .* m)
-    return score .* m, naive_apply_mask_pullback
+function ChainRulesCore.rrule(::typeof(apply_mask), ::NaiveMaskOp, mask, score)
+    m = GetIndexer(mask, size(score))
+    function naive_apply_mask_pullback(Ybar)
+        Ȳ = unthunk(Ybar)
+        thk = @thunk _fast_broadcast2!(*, similar(score), Ȳ, m)
+        (NoTangent(), NoTangent(), NoTangent(), thk)
+    end
+    return _fast_broadcast(*, score, m), naive_apply_mask_pullback
 end
 
 function ChainRulesCore.rrule(config::RuleConfig, ::typeof(apply_mask), op::GenericMaskOp, mask, score)
@@ -30,11 +33,11 @@ function ChainRulesCore.rrule(config::RuleConfig, ::typeof(apply_mask), op::Gene
         return y, broadcast_mask_pullback
     else
         tmp = getmask(m, score, scale)
-        apply_tape = rrule(config, apply, tmp, score)
-        isnothing(apply_tape) && (apply_tape = rrule_via_ad(config, apply, tmp, score))
+        apply_tape = rrule(config, apply, score, tmp)
+        isnothing(apply_tape) && (apply_tape = rrule_via_ad(config, apply, score, tmp))
         y, apply_pullback = apply_tape
         function mask_pullback(Ȳ)
-            _, _, ∂score = apply_pullback(Ȳ)
+            _, ∂score, _ = apply_pullback(Ȳ)
             return (NoTangent(), NoTangent(), NoTangent(), ∂score)
         end
         return y, mask_pullback
@@ -42,11 +45,11 @@ function ChainRulesCore.rrule(config::RuleConfig, ::typeof(apply_mask), op::Gene
 end
 
 function ChainRulesCore.rrule(config::RuleConfig, ::typeof(apply_broadcast_mask), f, mask, score, scale)
-    tmp = getmask(mask, score, scale)
-    Y, back = rrule_via_ad(config, broadcast, f, tmp, score)
+    tmp = GetIndexer(mask, size(score), convert(eltype(score), scale))
+    Y, back = rrule_via_ad(config, broadcast, f, score, tmp)
     function fallback_apply_broadcast_mask_pullback(Ȳ)
         Ȳs = back(Ȳ)
-        return (NoTangent(), Ȳs[2], NoTangent(), Ȳs[4], NoTangent())
+        return (NoTangent(), Ȳs[2], NoTangent(), Ȳs[3], NoTangent())
     end
     Y, fallback_apply_broadcast_mask_pullback
 end
@@ -57,15 +60,13 @@ function ChainRulesCore.rrule(config::RuleConfig, ::typeof(apply_broadcast_mask)
 end
 
 function ChainRulesCore.rrule(config::RuleConfig, ::typeof(apply_broadcast_mask), ::typeof(*), mask, score, scale)
-    rnm = randomness(mask)
-    m = getmask(mask, score, scale)
+    m = GetIndexer(mask, size(score), convert(eltype(score), scale))
     function apply_broadcast_mask_pullback(Ybar)
         Ȳ = unthunk(Ybar)
-        thk = @thunk m .* Ȳ
-        # thk = @thunk m .*= Ȳ; # TODO
+        thk = @thunk _fast_broadcast2!(*, similar(score), Ȳ, m)
         return (NoTangent(), NoTangent(), NoTangent(), thk, NoTangent())
     end
-    return score .* m, apply_broadcast_mask_pullback
+    return _fast_broadcast(*, score, m), apply_broadcast_mask_pullback
 end
 
 function ChainRulesCore.rrule(config::RuleConfig, pf::PrefixedFunction{typeof(apply_mask), <:Tuple{<:AbstractMaskOp}}, m, s)
@@ -79,8 +80,4 @@ function ChainRulesCore.rrule(config::RuleConfig, pf::PrefixedFunction{typeof(ap
     y, mask_pullback = rrule(config, apply_mask, op, mask, s)
     pullback(Ȳ) = (NoTangent(), mask_pullback(Ȳ)[4])
     return y, pullback
-end
-
-@init @require Zygote="e88e6eb3-aa80-5325-afca-941959d7151f" begin
-    Zygote.unbroadcast(x::AbstractMask, _) = nothing
 end
