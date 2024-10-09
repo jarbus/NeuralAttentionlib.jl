@@ -4,7 +4,7 @@ using NeuralAttentionlib
 using Random
 using Flux
 using CUDA
-using AMDGPU
+#= using AMDGPU =#
 using NNlib
 using Static
 using ChainRulesCore
