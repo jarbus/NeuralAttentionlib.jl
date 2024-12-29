@@ -8,6 +8,7 @@ using CUDA
 import LinearAlgebra
 import LinearAlgebra.BLAS
 using LinearAlgebra.BLAS: get_num_threads, set_num_threads
+using KernelAbstractions
 
 const NAlib = NeuralAttentionlib
 
@@ -39,7 +40,7 @@ for (fname, elty) in
     end
 end
 
-NeuralAttentionlib.ptrtypetag(::CUDA.CuArrayBackend) = CuArray
+NeuralAttentionlib.ptrtypetag(::CUDABackend) = CuArray
 NeuralAttentionlib.check_strided_gemm_type(A::CuArray{Float16}) = true
 
 end
