@@ -6,9 +6,9 @@ using GPUArrays
 using GPUArrays.GPUArraysCore
 using KernelAbstractions
 
-backend(::Type{<:CollapsedDimsArray{E, A}}) where {E, A} = KernelAbstractions.get_backend(A)
+KernelAbstractions.get_backend(::Type{<:CollapsedDimsArray{E, A}}) where {E, A} = KernelAbstractions.get_backend(A)
 
-NeuralAttentionlib.ptrtypetag(arr::AnyGPUArray) = NeuralAttentionlib.ptrtypetag(backend(arr))
+NeuralAttentionlib.ptrtypetag(arr::AnyGPUArray) = NeuralAttentionlib.ptrtypetag(KernelAbstractions.get_backend(arr))
 
 function NeuralAttentionlib.batched_transpose_f!(f, B::AnyGPUArray{T, 3}, A::AnyGPUArray{T, 3}) where T
     axes(B,1) == axes(A,2) && axes(B,2) == axes(A,1) && axes(A,3) == axes(B,3) || throw(DimensionMismatch(string(f)))
